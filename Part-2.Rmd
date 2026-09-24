@@ -1,0 +1,550 @@
+---
+title: "Part 2"
+output:
+  pdf_document: default
+  html_document: default
+date: "2026-08-18"
+---
+
+
+## R Markdown
+
+
+```{r, warning=FALSE}
+library(Mcomp)
+library(forecast)
+library(ggplot2)
+library(fpp2)
+library(tseries)
+library(smooth)
+library(dplyr)
+```
+
+
+## SET UP
+
+
+```{r}
+tsis <- 1001:1100
+tsn <- length(tsis)
+Methods <- c(
+  "ETS",
+  "ARIMA",
+  "Combined",
+  "Naive",
+  "SeasonalNaive"
+)
+
+#MASE errors for each series and each model - 100x5 model (100 series for 3 proposed models and 2 benchmark models)
+MASE <- array(
+  NA,
+  c(tsn, length(Methods))
+)
+colnames(MASE) <- Methods
+
+sMAPE <- array(
+  NA,
+  c(tsn, length(Methods))
+)
+colnames(sMAPE) <- Methods
+```
+
+## Data Description
+
+```{r}
+
+data_summary <- array(
+  NA,
+  c(tsn, 7)
+)
+
+colnames(data_summary) <- c(
+  "M3_ID",
+  "Series_Name",
+  "Period",
+  "Type",
+  "Train_Length",
+  "Test_Length",
+  "Frequency"
+)
+
+for (tsi in tsis) {
+  
+  y <- M3[[tsi]]$x
+  yout <- M3[[tsi]]$xx
+  
+  data_summary[tsi - 1000, ] <- c(
+    tsi,
+    M3[[tsi]]$sn,
+    M3[[tsi]]$period,
+    M3[[tsi]]$type,
+    length(y),
+    length(yout),
+    frequency(y)
+  )
+  
+}
+
+data_summary<-as.data.frame(data_summary)
+print(data_summary)
+```
+Although the series share the same quarterly frequency, they do not all contain the same number of training observations. Most series contain 44 observations in the training sample, whereas some have shorter histories, such as series N1011, which contains only 16 observations. This difference is relevant because models fitted to shorter series have less historical information available for estimating trend, seasonality and other forecasting patterns.
+
+```{r}
+train_lengths<-data.frame(
+  M3_ID = sapply(tsis, function(i) M3[[i]]$sn),
+  Train_Length = sapply(tsis, function(i) M3[[i]]$n)
+)
+
+count(train_lengths, Train_Length)
+
+test_lengths <- data.frame(
+  M3_ID = tsis,
+  Test_Length = sapply(
+    tsis,
+    function(i) length(M3[[i]]$xx)
+  )
+)
+
+count(test_lengths, Test_Length)
+```
+Most series have a training length of 44, while 5 of them have 26 and 1 has 16. All series have test data of 8 quarters ahead. The series with a different number of training data points are :
+
+```{r}
+common_length <- train_lengths %>%
+  count(Train_Length, sort = TRUE) %>%
+  slice(1) %>%
+  pull(Train_Length)
+
+train_lengths %>%
+  filter(Train_Length != common_length)
+```
+```{r}
+ggplot(train_lengths, aes(x = Train_Length)) +
+  geom_bar(fill = "steelblue") +
+  scale_x_continuous(breaks = sort(unique(train_lengths$Train_Length))) +
+  labs(
+    title = "Training-length distribution for selected M3 series",
+    x = "Number of training observations",
+    y = "Number of series"
+  ) +
+  theme_minimal()
+```
+
+## Exploratory Analysis
+
+Visual inspection of a few random series :
+
+```{r}
+par(mfrow = c(2, 2))
+
+plot(
+  M3[[1001]]$x,
+  main = "M3 Series 1001",
+  ylab = "Value",
+  xlab = "Time"
+)
+
+plot(
+  M3[[1002]]$x,
+  main = "M3 Series 1002",
+  ylab = "Value",
+  xlab = "Time"
+)
+
+plot(
+  M3[[1050]]$x,
+  main = "M3 Series 1050",
+  ylab = "Value",
+  xlab = "Time"
+)
+
+plot(
+  M3[[1100]]$x,
+  main = "M3 Series 1100",
+  ylab = "Value",
+  xlab = "Time"
+)
+
+par(mfrow = c(1, 1))
+
+```
+### Seasonality and Trend
+
+We can see that some of the data may have seasonal components while others may not.
+
+```{r}
+is_trended <- array(
+  FALSE,
+  tsn
+)
+
+is_seasonal <- array(
+  FALSE,
+  tsn
+)
+
+for (tsi in tsis) {
+  
+  y <- M3[[tsi]]$x
+  
+  fit <- ets(y)
+  
+  is_trended[tsi - 1000] <-
+    fit$components[2] != "N"
+  
+  is_seasonal[tsi - 1000] <-
+    fit$components[3] != "N"
+}
+
+sum(is_trended)
+sum(!is_trended)
+
+sum(is_seasonal)
+sum(!is_seasonal)
+
+```
+77 of the 100 series show a trend while 23 do not, and 25 of the 100 series have seasonality while 75 do not.
+
+```{r}
+component_summary <- data.frame(
+  Component = c(
+    "Trend",
+    "No trend",
+    "Seasonality",
+    "No seasonality",
+    "Trend and seasonality",
+    "Trend only",
+    "Seasonality only",
+    "Neither"
+  ),
+  
+  Number_of_series = c(
+    sum(is_trended),
+    sum(!is_trended),
+    sum(is_seasonal),
+    sum(!is_seasonal),
+    sum(is_trended & is_seasonal),
+    sum(is_trended & !is_seasonal),
+    sum(!is_trended & is_seasonal),
+    sum(!is_trended & !is_seasonal)
+  )
+)
+
+component_summary
+```
+
+
+## Forecasting methods
+
+For forecasting we will use 3 methods namely automatic ETS, automatic ARIMA and a combined model of the 2.
+
+The combined forecast assigns equal weight to ETS and ARIMA because the two models represent different forecasting structures and neither model is assumed to dominate before evaluation.
+
+The benchmark methods used are Naive and Seasonal Naive.
+
+```{r}
+# To be used for logging the non-seasonal and seasonal orders of the ARIMA model
+ARorder <- array(0, 5)
+MAorder <- array(0, 5)
+Differencing <- array(0, 3)
+
+SeasonalARorder <- array(0, 3)
+SeasonalMAorder <- array(0, 3)
+SeasonalDifferencing <- array(0, 3)
+
+for (tsi in tsis){
+  
+  print(tsi)
+  
+  y <- M3[[tsi]]$x
+  yout <- M3[[tsi]]$xx
+  
+  h <- length(yout)
+  
+  # Proposed model 1: ETS
+  
+  fit_ets <- ets(y)
+  
+  fcs_ets <- forecast(
+    fit_ets,
+    h = h
+  )$mean
+  
+  # Proposed model 2: ARIMA
+  
+  fit_arima <- auto.arima(y)
+  
+  fcs_arima <- forecast(
+    fit_arima,
+    h = h
+  )$mean
+  
+  # Determine non-seasonal and seasonal orders for ARIMA
+  ARorder[fit_arima$arma[1] + 1] <-ARorder[fit_arima$arma[1] + 1] + 1
+  
+  MAorder[fit_arima$arma[2] + 1] <-MAorder[fit_arima$arma[2] + 1] + 1
+  
+  Differencing[fit_arima$arma[6] + 1] <-Differencing[fit_arima$arma[6] + 1] + 1
+  
+  SeasonalARorder[fit_arima$arma[3] + 1] <-SeasonalARorder[fit_arima$arma[3] + 1] + 1
+  
+  SeasonalMAorder[fit_arima$arma[4] + 1] <-SeasonalMAorder[fit_arima$arma[4] + 1] + 1
+  
+  SeasonalDifferencing[fit_arima$arma[7] + 1] <-SeasonalDifferencing[fit_arima$arma[7] + 1] + 1
+  
+  # Proposed model 3: combined ETS-ARIMA
+  
+  fcs_combined <- 0.5 * fcs_ets +
+                  0.5 * fcs_arima
+  
+  # Benchmark 1: naive
+  
+  fcs_naive <- naive(
+    y,
+    h = h
+  )$mean
+  
+  # Benchmark 2: seasonal naive
+  
+  fcs_snaive <- snaive(
+    y,
+    h = h
+  )$mean
+  
+  # Seasonal MASE scaling factor
+  
+  scale <- mean(abs(diff(y, lag = 4)))
+  
+  # Store forecasts in a list
+  
+  forecasts <- list(
+    fcs_ets,
+    fcs_arima,
+    fcs_combined,
+    fcs_naive,
+    fcs_snaive
+  )
+  
+  # Calculate errors
+  
+  for (method in 1:length(Methods)){
+    
+    fcs <- forecasts[[method]]
+    
+    MASE[tsi - 1000, method] <-
+      mean(abs(yout - fcs)) / scale
+    
+    sMAPE[tsi - 1000, method] <-
+      200 * mean(
+        abs(yout - fcs) /
+        (abs(yout) + abs(fcs))
+      )
+  }
+}
+```
+
+ARIMA model non-seasonal orders:
+
+```{r}
+names(ARorder) <- paste0("p=",0:(length(ARorder) - 1))
+
+names(MAorder) <- paste0("q=",0:(length(MAorder) - 1))
+
+names(Differencing) <- paste0("d=",0:(length(Differencing) - 1))
+
+names(SeasonalARorder) <- paste0("P=",0:(length(SeasonalARorder) - 1))
+
+names(SeasonalMAorder) <- paste0("Q=",0:(length(SeasonalMAorder) - 1))
+
+names(SeasonalDifferencing) <- paste0("D=",0:(length(SeasonalDifferencing) - 1))
+
+ARorder
+MAorder
+Differencing
+
+SeasonalARorder
+SeasonalMAorder
+SeasonalDifferencing
+```
+The automatic ARIMA results indicate that the selected non-seasonal models were generally parsimonious. Most series selected low AR and MA orders, withp=0 and q=0 being the most common choices. Non-seasonal differencing was more prevalent: 87 of the 100 series used at least one non-seasonal difference, with d=1, being the most frequent choice. Seasonal autoregressive and moving-average terms were less common than their non-seasonal counterparts. In particular, 86 series had P=0, 65 had Q=0, and 75 had D=0. Therefore, although the data are quarterly, the automatic ARIMA procedure did not require a seasonal component for most series
+
+## Evaluation Measures
+
+MASE and sMAPE were selected because the forecasts are evaluated across 100 quarterly time series with different scales and magnitudes. Both measures are scale-independent, which allows accuracy to be compared more fairly across series than would be possible using unscaled measures such as MAE or RMSE.
+
+MASE compares the forecast error with the error from a seasonal naïve benchmark. Since the data are quarterly, the scaling factor is based on seasonal differences at lag four. This gives MASE a useful interpretation: values below one indicate that the forecasting method outperforms the seasonal benchmark, whereas values above one indicate inferior performance.
+
+sMAPE was selected to complement MASE as percentage-based measure. It evaluates the forecast error relative to the combined size of the actual and forecast values. Lower sMAPE values indicate greater forecast accuracy.
+```{r}
+boxplot(
+  MASE,
+  names = Methods,
+  main = "MASE Across 100 Quarterly Series",
+  xlab = "Forecasting method",
+  ylab = "MASE"
+)
+
+boxplot(
+  sMAPE,
+  names = Methods,
+  main = "sMAPE Across 100 Quarterly Series",
+  xlab = "Forecasting method",
+  ylab = "sMAPE"
+)
+```
+Bar-plot of errors:
+
+```{r}
+par(mfrow = c(1, 2))
+
+barplot(
+  colMeans(MASE, na.rm = TRUE),
+  names.arg = Methods,
+  main = "Mean MASE",
+  ylab = "Mean MASE",
+  las = 2
+)
+
+barplot(
+  colMeans(sMAPE, na.rm = TRUE),
+  names.arg = Methods,
+  main = "Mean sMAPE",
+  ylab = "Mean sMAPE",
+  las = 2
+)
+
+par(mfrow = c(1, 1))
+```
+
+Distribution of the number of wins of errors for MASE:
+
+```{r}
+winner_MASE <- apply(
+  MASE,
+  1,
+  which.min
+)
+
+winner_MASE <- table(
+  factor(
+    winner_MASE,
+    levels = 1:length(Methods),
+    labels = Methods
+  )
+)
+
+barplot(
+  winner_MASE,
+  main = "Number of Series Won Using MASE",
+  ylab = "Number of series",
+  las = 2
+)
+```
+
+Distribution of the number of wins of errors for sMAPE:
+
+```{r}
+winner_sMAPE <- apply(
+  sMAPE,
+  1,
+  which.min
+)
+
+winner_sMAPE <- table(
+  factor(
+    winner_sMAPE,
+    levels = 1:length(Methods),
+    labels = Methods
+  )
+)
+
+barplot(
+  winner_sMAPE,
+  main = "Number of Series Won Using sMAPE",
+  ylab = "Number of series",
+  las = 2
+)
+```
+
+Summary of proposed models
+
+```{r}
+colMeans(
+  MASE[, 1:3],
+  na.rm = TRUE
+)
+
+colMeans(
+  sMAPE[, 1:3],
+  na.rm = TRUE
+)
+```
+
+Summary of benchmark models 
+
+```{r}
+colMeans(
+  MASE[, 4:5],
+  na.rm = TRUE
+)
+
+colMeans(
+  sMAPE[, 4:5],
+  na.rm = TRUE
+)
+```
+Compare all 5 models
+
+```{r}
+results <- rbind(
+  Mean_MASE = colMeans(
+    MASE,
+    na.rm = TRUE
+  ),
+  
+  Median_MASE = apply(
+    MASE,
+    2,
+    median,
+    na.rm = TRUE
+  ),
+  
+  Mean_sMAPE = colMeans(
+    sMAPE,
+    na.rm = TRUE
+  ),
+  
+  Median_sMAPE = apply(
+    sMAPE,
+    2,
+    median,
+    na.rm = TRUE
+  )
+)
+
+colnames(results) <- Methods
+
+results
+```
+Winner
+
+```{r}
+best_mean_mase <- names(which.min(results["Mean_MASE", ]))
+best_median_mase <- names(which.min(results["Median_MASE", ]))
+best_mean_smape <- names(which.min(results["Mean_sMAPE", ]))
+best_median_smape <- names(which.min(results["Median_sMAPE", ]))
+
+best_mean_mase
+best_median_mase
+best_mean_smape
+best_median_smape
+```
+
+Although ETS achieved the lowest forecast error for more individual series than the combined model, the combined model produced marginally lower mean and median values for both MASE and sMAPE. This distinction suggests that ETS was the most frequently successful method at the individual-series level, whereas the combined model delivered better overall performance across the complete collection of series. The lower mean errors indicate that the combined model generated smaller errors on average, while the lower median errors indicate that its typical performance was also better. Therefore, the combined model may be less dominant in terms of the number of individual wins but more consistently accurate across the dataset.
+```{r}
+results
+winner_MASE
+winner_sMAPE
+```
+

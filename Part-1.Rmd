@@ -1,0 +1,332 @@
+---
+title: "Part-1"
+output: html_document
+date: "2026-08-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r,warning=FALSE}
+library(Mcomp)
+library(forecast)
+library(ggplot2)
+library(fpp2)
+library(tseries)
+library(smooth)
+
+data<-M3[[1357]]
+```
+## Data exploration
+
+```{r}
+y<-data$x
+yout<-data$xx
+h<-data$h 
+plot(y)
+```
+
+From the plot we observe a clear downward trend with a quarterly seasonality, while at first sight the data appears to be non-stationary
+
+```{r}
+frequency(y)
+start(y)
+end(y)
+length(y)
+```
+
+The data is quarterly and starts from the 2nd quarter of 1978 and ends on the 3rd quarter of 1993, with a total of 62 observations.
+
+
+```{r}
+summary(y)
+
+sd(y)
+```
+
+Summary by Quarter
+
+```{r}
+season_df <- data.frame(
+  value = as.numeric(y),
+  quarter = factor(cycle(y))
+)
+
+ggplot(season_df, aes(x = quarter, y = value)) +
+  geom_boxplot() +
+  labs(
+    title = "Distribution by Quarter",
+    x = "Quarter",
+    y = "Value"
+  ) +
+  theme_minimal()
+```
+
+There seem to be 2 outliers per quarter, which can be explained by the normal line plot of the series, as towards the end of the plot (1992-1993) there is a bigger decline of the data compared to the first years.
+
+###  ACF and PACF plots
+
+```{r}
+Acf(y, main="ACF of Original Series")
+Pacf(y,main = "PACF of Original Series")
+```
+
+The plots suggest strong autocorrelation. To confirm that I also ran a Portmanteau test with the null hypothesis being that there is not autocorrelation in the variable:
+
+```{r}
+Box.test(y, lag=1) 
+```
+
+The p-value is much less than 0.05 so we can reject the null hypothesis and assume there is autocorrelation in the data.
+
+Let us now see the ACF and PACF plots of the differenced data :
+
+```{r}
+dy<-diff(y)
+
+Acf(dy, main="ACF of First-Differenced Series")
+Pacf(dy, main="PACF of First-Differenced Series")
+
+
+```
+
+The ACF and PACF plots show that seasonal differencing should be taken into consideration. Another way of checking that is to run `nsdiffs` on the differenced data :
+
+```{r}
+nsdiffs(dy)
+dys<-diff(dy,lag=4)
+```
+```{r}
+plot(dys, ylab="Value", main="First and Seasonally differenced series")
+Acf(dys, main="ACF of First and Seasonally differenced series")
+Pacf(dys, main="PACF of First and Seasonally differenced series")
+```
+
+After applying a regular and a seasonal difference, the transformed series appears stationary enough for ARIMA modelling. The ACF and PACF of the differenced series do not have a slow decay anymore, so additional differencing is probably unnecessary.We can see that after the seasonal differencing some seasonal effects are still in place, with significant spikes occuring at lags 3,4,5,9,13,16 in the ACF plot, and 3,4,8,9,12 in the PACF plot, indicating that some lag-4 structure remains. The ACF spikes seems more random than the PACF spikes, with the PACF having spikes every 4 lags(4,8,12) plus 2 extra spikes at lag 3 and 9. To keep the degrees of freedom high and the IC low we will only use P=1 (AR(1)) later in modelling.
+
+
+
+### Stationarity
+
+The ACF plot above indicates that the data is not stationary, as the the levels of the plot drop below the 95% interval after 9 to 10 lags. However we can perform an Augmented Dickey-Fuller (ADF) test and a Kwiatkowski-Phillips-Schmidt-Shin (KPSS) test to confirm our observations :
+
+```{r}
+adf.test(y, alternative="stationary")
+kpss.test(y)
+```
+
+
+
+The ADF test has a p-value of 0.9 meaning that we need to accept the null hypothesis of non-stationarity and the KPSS test has a p-value of less thatn 0.05 showing that we need to reject the null hypothesis of stationarity in the data. Both tests agree that the data is non-stationary which coincides with our observations/conclusion on the ACF plot.
+
+The above observations suggest that transformation and/or differencing should be applied to the data when creating an ARIMA model later on.
+
+### Decomposition
+
+First we will perform classical decomposition :
+
+```{r}
+plot(decompose(y, type="additive"))
+plot(decompose(y, type="multiplicative"))
+```
+
+STL decomposition :
+
+```{r}
+plot(stl(y,s.window="periodic"))
+```
+
+
+### Insights
+
+The series shows a downward trend from the 1980s onward and a strong quarterly seasonal pattern. STL and classical decomposition both confirm that the trend and seasonal components are significant, while the remainder seems to be small compared to the scale of the data.The seasonal component amplitude appears to not change much overtime, suggesting an additive model formulation. The trend history does not give any signs of dampening, therefore we will assume that the apparent recent decline may reflect a temporary change rather than a stable trend that should be damped.
+
+
+## Modelling
+
+In this section we will fit the data into 3 models, one regression, one ETS and one ARIMA.From the previous exploration of the data, we can assume an additive seasonality and either an additive or damped additive trend.
+
+### Regression
+
+The regression model was specified as a linear trend plus quarterly seasonal dummy variables. The trend term captures the overall long-run movement of the series, while the seasonal dummies capture systematic differences between quarters. Quarter 1 is used as the baseline category, and the remaining three quarter coefficients measure departures from that baseline.
+```{r}
+fit_reg<-tslm(y~trend+season)
+summary(fit_reg)
+
+fcs_reg<-forecast(fit_reg, h=h, level=c(80,95)) #forecast the next 8 quarters for confidence intervals of 80% and 95%
+plot(fcs_reg) 
+lines(yout, col="black")
+ 
+  
+```
+
+
+#### Residuals
+
+```{r}
+res_reg <- residuals(fit_reg)
+
+checkresiduals(fit_reg)
+```
+The residuals plot shows long runs of positive and negative erros instead of a random fluctuation around 0. Residuals are negative at the beginning and the end of the plot, while they remain positive in the middle. This means that a linear model is to simple to capture the behavior of the data. The ACF plot show strong autocorrelation, which means that the model has failed to capture temporal information. We can also run numerical tests on the residuals to confirm the over-simplicity of the model.
+
+
+Ljung-Box test null hypothesis is that the residuals are independently distributed, while the shapiro test assumes normal distribution of errors. 
+
+```{r}
+Box.test(res_reg, type="Ljung-Box")
+shapiro.test(res_reg)
+```
+As both p-values are less than 0.05, we have to reject their null hypotheses. This violates the normality and independence of errors in the L-I-N-E assumptions for linear regression. 
+
+#### Parameters
+
+```{r}
+summary(fit_reg)
+```
+
+The estimated trend coefficientis -23.7, indicating a decrease of 23.7 units per quarter - or 94.8 per year. This coefficient is statistically significant as the p-value is 2.3e-14. We also see only 3 seasonal coefficients. This is because the first quarter acts as a reference quarter and the other 3 coefficients estimate the deviation from that quarter.
+
+The seasonal effects are comparatively weak with Quarter 3 having the largest estimated positive difference relative to Quarter 1, at 204.7 units. However, this effect is marginally significant with a p-value of 0.0578.
+
+The regression model shows a downward trend but limited evidence that the quarterly seasonal effects differ systematically from the first quarter.
+
+The model's explained variation is at 70.2%, while after adjusting for the number of predictors it explains 68.1%.
+
+With the p-value of the F-statistic being much lower than 0.05, we can conclude that the variables are jointly useful.
+
+### ETS
+
+From the decomposition performed previously, we concluded that an additive model may be adequate for ETS modelling, as the seasonal component seems approximately constant rather than varying with time. We will try an additive model :
+
+```{r}
+fit_aaa <- ets(y, model = "AAA", damped=FALSE)
+summary(fit_aaa)
+
+#Forecasts
+fcs_aaa<-forecast(fit_aaa, h=h, level=c(80,95))
+plot(fcs_aaa)
+lines(yout, col="black")
+```
+
+
+#### Residuals
+
+```{r}
+checkresiduals(fit_aaa)
+```
+The residuals fluctuate around zero without an obvious trend or pattern. While there is an outlier in the beginning of approximately -500, most residuals are contained roughly between -250 and +200.
+The ACF plot of the residuals has no spikes outside the 95% confidence intervals. There are some negative correlations at lags 6 to 10 and positive correlations at 16-17, but none are statistically significant. From the distribution plot we can see that the residuals seem approximately centred and bell shaped, with some right skewness, possibly subject to the outlier of almost -500.
+
+We can again run a Shapiro-Wilk and Ljung Box test to confirm our observations:
+
+
+```{r}
+res_aaa<-residuals(fit_aaa)
+Box.test(res_aaa, type="Ljung-Box")
+shapiro.test(res_aaa)
+```
+The Ljung Box test shows there is no autocorrelation while the Shapiro-Wilk test shows non-normal errors.
+
+#### Parameters
+
+```{r}
+summary(fit_aaa)
+```
+Level smoothing parameter α is 0.9593, which means that the estimated level reacts strongly to more recent observations
+
+Trend smoothing parameter β is 0.1006, which means that the model does not change its estimated trend/direction in response to every new observation.
+
+Seasonality smoothing parameter γ is 0.0001, which means that the quarterly seasonal patter is fixed over time. The model detects an optimal seasonal pattern and tries to keep it stable - consistent with earlier observation of seasonal effects not changing over time.
+
+
+### ARIMA
+
+As discussed previously, an ARIMA model of (0,1,0)(1,1,0)4 will be fitted in the series.
+
+```{r}
+fit_arima<-Arima(y, order=c(0,1,0), seasonal=list(order=c(1,1,0), period=4))
+summary(fit_arima)
+```
+
+```{r}
+fcs_arima<-forecast(fit_arima, h=h, levels=c(80,95))
+plot(fcs_arima)
+lines(yout, col="black")
+```
+
+
+#### Residuals
+
+```{r}
+checkresiduals(fit_arima)
+```
+
+```{r}
+res_arima<-residuals(fit_arima)
+Box.test(res_arima, type="Ljung-Box")
+shapiro.test(res_arima)
+```
+
+The Ljung Box test concludes that there is no statistical evidence for autocorrelation, and the Shapiro-Wilk test shows that the residuals follow a normal distribution.
+
+#### Parameters
+
+```{r}
+summary(fit_arima)
+```
+### Model Comparison on Test Data 
+
+#### Forecast Errors
+
+For the model comparison, Root Mean Squared Error will be used. It is meaningful in this case as it measures the typical forecast error in the original units.
+
+```{r}
+accuracy_results <- data.frame(
+  Model = c("Regression", "ETS", "ARIMA"),
+  RMSE = c(
+    sqrt(mean((yout - fcs_reg$mean)^2)),
+    sqrt(mean((yout - fcs_aaa$mean)^2)),
+    sqrt(mean((yout - fcs_arima$mean)^2))
+  ),
+  MAE = c(
+    mean(abs(yout - fcs_reg$mean)),
+    mean(abs(yout - fcs_aaa$mean)),
+    mean(abs(yout - fcs_arima$mean))
+  )
+)
+
+accuracy_results
+```
+Point forecasts :
+
+```{r}
+plot(
+  y,
+  xlim = c(start(y)[1], end(y)[1] + 2),
+  ylim = range(c(y, yout, fcs_reg$mean, fcs_aaa$mean, fcs_arima$mean)),
+  main = "Eight-Quarter Forecast Comparison",
+  ylab = "Value",
+  xlab = "Time"
+)
+
+lines(fcs_reg$mean, col = "blue", lwd = 2)
+lines(fcs_aaa$mean, col = "red", lwd = 2)
+lines(fcs_arima$mean, col = "darkgreen", lwd = 2)
+lines(yout, col = "black", lwd = 2)
+
+legend(
+  "bottomleft",
+  legend = c("Observed test data", "Regression", "ETS", "ARIMA"),
+  col = c("black", "blue", "red", "darkgreen"),
+  lty = 1,
+  lwd = 2
+)
+```
+
+
+The regression model produced the lowest RMSE on the  8 quarter horizon, at 437 compared with the 512 for ETS(A,A,A) and 566 for ARIMA. The regression model provided the most accurate forecasts for this validation period, meaning that the continuation of the estimated linear trend and quarterly seasonal patter was more useful for forecasting at this horizon than dynamic models such as ETS and ARIMA.
+
