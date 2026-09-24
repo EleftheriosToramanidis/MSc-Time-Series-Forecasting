@@ -37,10 +37,10 @@ The analysis compares regression, exponential smoothing and ARIMA-based approach
 
 ## Repository contents
 
-- `Part_1_Manual_Modelling.Rmd` — R Markdown source for the manual modelling analysis.
-- `Part_1_Manual_Modelling.html` — rendered HTML report for Part 1.
-- `Part_2_Batch_Forecasting.Rmd` — R Markdown source for the batch forecasting analysis.
-- `Part_2_Batch_Forecasting.html` — rendered HTML report for Part 2.
+- `Part-1.Rmd` — R Markdown source for the manual modelling analysis.
+- `Forecasting_FinalAssignment_Part1.html` — rendered HTML report for Part 1.
+- `Part-2.Rmd` — R Markdown source for the batch forecasting analysis.
+- `Forecasting_FinalAssignment_Part2.html` — rendered HTML report for Part 2.
 - `Executive_Summary.pdf` — concise summary of the findings and managerial implications.
 
 ## Key skills demonstrated
